@@ -1,5 +1,9 @@
 import os
 from typing import BinaryIO
+import bpe_tokenizer
+from absl import app
+
+BASE_PATH = "/home/handeng/Desktop/Projects/CS336/homework1/data"
 
 
 def find_chunk_boundaries(
@@ -50,14 +54,37 @@ def find_chunk_boundaries(
   return sorted(set(chunk_boundaries))
 
 
-## Usage
-with open(..., "rb") as f:
-  num_processes = 4
-  boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+def main(argv):
+  del argv
+  dataset_name = "TinyStoriesV2-GPT4-valid.txt"
+  file_path = os.path.join(BASE_PATH, dataset_name)
+  tokenizer_model_name = "TinyStoriesV2-GPT4-valid_tokenizer.model"
+  tokenizer_vocab_name = "TinyStoriesV2-GPT4-valid_vocab.bin"
+  ## Usage
 
-  # The following is a serial implementation, but you can parallelize this
-  # by sending each start/end pair to a set of processes.
-  for start, end in zip(boundaries[:-1], boundaries[1:]):
-    f.seek(start)
-    chunk = f.read(end - start).decode("utf-8", errors="ignore")
-    # Run pre-tokenization on your chunk and store the counts for each pre-token
+  tokenizer = bpe_tokenizer.BPETokenizer()
+
+  with open(file_path, "rb") as f:
+    num_processes = 1
+    boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+
+    # The following is a serial implementation, but you can parallelize this
+    # by sending each start/end pair to a set of processes.
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+      print(f"start: {start}, end: {end}", start, end)
+      f.seek(start)
+      chunk = f.read(end - start).decode("utf-8", errors="ignore")
+      # Run pre-tokenization on your chunk and store the counts for each pre-token
+      splitted_chunks = bpe_tokenizer.split_text_with_special_tokens(
+          bpe_tokenizer.SPECIAL_TOKENS, chunk)
+      print("Num of splitted chunks: ", len(splitted_chunks))
+      tokenizer.train(splitted_chunks)
+      break
+  tokenizer_save_path = os.path.join(BASE_PATH, tokenizer_model_name)
+  tokenizer_vocab_save_path = os.path.join(BASE_PATH, tokenizer_vocab_name)
+  tokenizer.save(tokenizer_save_path)
+  tokenizer.save_vocab(tokenizer_vocab_save_path)
+
+
+if __name__ == '__main__':
+  app.run(main)
