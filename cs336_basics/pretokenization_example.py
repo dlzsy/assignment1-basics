@@ -1,3 +1,5 @@
+"""Example script for chunking text and training the BPE tokenizer."""
+
 import os
 from typing import BinaryIO
 import bpe_tokenizer
@@ -11,10 +13,19 @@ def find_chunk_boundaries(
     desired_num_chunks: int,
     split_special_token: bytes,
 ) -> list[int]:
+  """Finds chunk boundaries aligned to a special-token byte sequence.
+
+  The returned boundaries can be used to split a file into independently
+  processable segments while avoiding cuts through ``split_special_token``.
+
+  Args:
+    file: Open binary file object positioned anywhere.
+    desired_num_chunks: Target number of chunks.
+    split_special_token: Special-token bytes used as valid split points.
+
+  Returns:
+    Sorted unique boundary offsets including ``0`` and ``file_size``.
   """
-    Chunk the file into parts that can be counted independently.
-    May return fewer chunks if the boundaries end up overlapping.
-    """
   assert isinstance(split_special_token,
                     bytes), "Must represent special token as a bytestring"
 
@@ -55,6 +66,7 @@ def find_chunk_boundaries(
 
 
 def main(argv):
+  """Runs a small end-to-end pretokenization and BPE training example."""
   del argv
   dataset_name = "TinyStoriesV2-GPT4-valid.txt"
   file_path = os.path.join(BASE_PATH, dataset_name)
@@ -84,6 +96,7 @@ def main(argv):
   tokenizer_vocab_save_path = os.path.join(BASE_PATH, tokenizer_vocab_name)
   tokenizer.save(tokenizer_save_path)
   tokenizer.save_vocab(tokenizer_vocab_save_path)
+  print("Full vocab: ", tokenizer.vocab)
 
 
 if __name__ == '__main__':

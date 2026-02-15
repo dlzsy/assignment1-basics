@@ -1,6 +1,7 @@
 {
   "cSpell.words": [
-    "absl"
+    "absl",
+    "pretokenization"
   ],
   "editor.fontFamily": "'Roboto Mono', monospace",
   "editor.fontSize": 13,
