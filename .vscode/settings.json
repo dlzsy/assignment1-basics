@@ -1,5 +1,9 @@
 {
   "cSpell.words": [
     "absl"
-  ]
+  ],
+  "editor.fontFamily": "'Roboto Mono', monospace",
+  "editor.fontSize": 13,
+  "editor.guides.indentation": true,
+  "editor.renderLineHighlight": "gutter",
 }
