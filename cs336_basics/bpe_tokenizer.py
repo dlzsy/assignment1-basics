@@ -12,6 +12,8 @@ from absl import app
 # Special tokens to be put at the beginning  of the tokenizer.
 SPECIAL_TOKENS = ("<|endoftext|>",)
 
+SPECIAL_TOKENS_SET = set(SPECIAL_TOKENS)
+
 # REGEX pattern to pre-tokenizer the texts.
 _PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
@@ -29,10 +31,41 @@ def split_text_with_special_tokens(special_tokens, s):
   return re.split(re.escape('|'.join(special_tokens)), s)
 
 
+def split_text_with_special_tokens_inclusive(special_tokens, s):
+  """Splits text segments around special tokens including special tokens.
+
+  Args:
+    special_tokens: Iterable of literal special-token strings.
+    s: Input text to split.
+
+  Returns:
+    A list of text chunks separated by any special token, with special tokens
+      also within but in corresponding idx of the list following the order.
+  """
+  pattern = f"({'|'.join(re.escape(t) for t in special_tokens)})"
+  return tuple(t for t in re.split(pattern, s) if t)
+
+
 @dataclasses.dataclass
 class BPETokenizer:
-  """Byte Pair Encoding tokenizer trainer with incremental pair-count updates."""
+  """Trains and applies a byte-level Byte Pair Encoding (BPE) tokenizer.
+
+  This dataclass stores the vocabulary state and incremental caches used
+  throughout BPE training and inference.
+
+  Attributes:
+    bytes_to_idx: Mapping from token bytes to integer token IDs.
+    idx_to_bytes: Mapping from integer token IDs back to token bytes.
+    words_frequency: Word-frequency table where each word is a tuple of byte
+      tokens.
+    target_vocab_size: Desired vocabulary size after BPE merges.
+    current_vocab_size: Current number of entries in the vocabulary.
+    new_bytes_to_replace: Cache mapping candidate merged pair bytes to words
+      that contain the pair.
+    new_bytes_pair_freq: Weighted frequency table for adjacent byte pairs.
+  """
   bytes_to_idx: dict[bytes, int] = field(default_factory=dict)
+  idx_to_bytes: dict[int, bytes] = field(default_factory=dict)
   words_frequency: dict[tuple[bytes], int] = field(default_factory=dict)
   target_vocab_size: int = 10000
   current_vocab_size: int = 0
@@ -68,7 +101,8 @@ class BPETokenizer:
     """
     for text in input_texts:
       for match in self.pattern.finditer(text):
-        word_bytes = tuple(bytes(c, 'utf-8') for c in match.group(0))
+        matched_bytes = match.group(0).encode('utf-8')
+        word_bytes = tuple(bytes([b]) for b in matched_bytes)
         self.words_frequency[word_bytes] = self.words_frequency.get(
             word_bytes, 0) + 1
 
@@ -255,7 +289,11 @@ class BPETokenizer:
       filepath: Output path for the pickled vocabulary dictionary.
     """
     with open(filepath, 'wb') as f:
-      pickle.dump(self.bytes_to_idx, f)
+      vocab_dict = {
+          'bytes_to_idx': self.bytes_to_idx,
+          'idx_to_bytes': self.idx_to_bytes
+      }
+      pickle.dump(vocab_dict, f)
       print(f"===== Save tokenizer vocab to {filepath} successfully. =====")
 
   def load_vocab(self, filepath):
@@ -265,7 +303,9 @@ class BPETokenizer:
       filepath: Path to a pickled vocabulary dictionary.
     """
     with open(filepath, 'rb') as f:
-      self.bytes_to_idx = pickle.load(f)
+      vocab_dict = pickle.load(f)
+      self.bytes_to_idx = vocab_dict['bytes_to_idx']
+      self.idx_to_bytes = vocab_dict['idx_to_bytes']
       print(f"===== Load tokenizer vocab from {filepath} successfully. =====")
 
   @classmethod
@@ -309,6 +349,53 @@ class BPETokenizer:
       if self.current_vocab_size == self.target_vocab_size or not updated:
         break
 
+    # Build the reverse vocabulary.
+    self.idx_to_bytes = {a: b for b, a in self.bytes_to_idx.items()}
+
+  def _encode_word(self, word: list[bytes] | tuple[bytes]) -> list[int]:
+    new_word = word
+    while True:
+      found_new_word = False
+      for idx, (bytes1, bytes2) in enumerate(zip(new_word, new_word[1:])):
+        new_byte = bytes1 + bytes2
+        temp_new_word = new_word[:idx] + (new_byte,) + new_word[idx + 2:]
+        new_word_exists = all(a in self.bytes_to_idx for a in temp_new_word)
+        if new_word_exists:
+          found_new_word = True
+          new_word = temp_new_word
+          break
+      if not found_new_word:
+        break
+
+    return [self.bytes_to_idx[a] for a in new_word]
+
+  def encode(self, text):
+    chunked_texts = split_text_with_special_tokens_inclusive(
+        SPECIAL_TOKENS, text)
+    print(chunked_texts)
+    output_tokens = []
+
+    for text in chunked_texts:
+      if text in SPECIAL_TOKENS_SET:
+        output_tokens.append(self.bytes_to_idx[text.encode('utf-8')])
+        continue
+      word_bytes_list = []
+      for match in self.pattern.finditer(text):
+        matched_bytes = match.group(0).encode('utf-8')
+        word_bytes_list.append(tuple(bytes([b]) for b in matched_bytes))
+
+      for word_bytes in word_bytes_list:
+        output_tokens.extend(self._encode_word(word_bytes))
+
+    return output_tokens
+
+  def decode(self, tokens: list[int]):
+    final_output = b''
+    for token in tokens:
+      final_output += self.idx_to_bytes[token]
+
+    return final_output.decode('utf-8')
+
 
 def main(argv):
   """Runs a minimal local training example."""
@@ -321,12 +408,6 @@ def main(argv):
 
   tokenizer = BPETokenizer()
   tokenizer.train(input_texts)
-
-  print("Final vocabulary: ", tokenizer.vocab)
-
-  input_text = "low low low low low"
-
-  print(split_text_with_special_tokens(SPECIAL_TOKENS, input_text))
 
 
 if __name__ == '__main__':

@@ -6,13 +6,14 @@ import bpe_tokenizer
 from absl import app, flags
 from multiprocessing import Pool
 from pathlib import Path
+import re
 
 BASE_PATH = "/home/handeng/Desktop/Projects/CS336/homework1/data"
 
 _NUM_PROCESSES = flags.DEFINE_integer('num_processes', 28,
                                       "Num of parallel jobs to pre-tokenize.")
 
-_TARGET_VOCAB_SIZE = flags.DEFINE_integer('target_vocab_size', 30000,
+_TARGET_VOCAB_SIZE = flags.DEFINE_integer('target_vocab_size', 10000,
                                           "Target vocabulary size.")
 
 
@@ -96,15 +97,12 @@ def split_doc_to_chunks(args):
       os.path.join(parent_dir, 'vocab_freq', f'{stem}_{str(process_idx)}.bin'))
 
 
-def main(argv):
-  """Runs a small end-to-end pretokenization and BPE training example."""
-  del argv
-  split = 'train'
-  dataset_name = f"TinyStoriesV2-GPT4-{split}.txt"
+def train_tokenizer(split='train', dataset_name='TinyStoriesV2-GPT4-'):
+  dataset_name = f"{dataset_name}{split}.txt"
   file_path = os.path.join(BASE_PATH, dataset_name)
   num_processes = _NUM_PROCESSES.value
-  tokenizer_model_name = f"TinyStoriesV2-GPT4-{split}_tokenizer.model"
-  tokenizer_vocab_name = f"TinyStoriesV2-GPT4-{split}_vocab.bin"
+  tokenizer_model_name = f"{dataset_name}{split}_tokenizer.model"
+  tokenizer_vocab_name = f"{dataset_name}{split}_vocab.bin"
 
   words_freq_base_dir = os.path.join(BASE_PATH, 'vocab_freq')
   if not os.path.exists(words_freq_base_dir):
@@ -118,7 +116,7 @@ def main(argv):
                   for i in range(num_processes))
 
   with Pool(processes=num_processes) as pool:
-    results = pool.map(split_doc_to_chunks, arg_list)
+    _ = pool.map(split_doc_to_chunks, arg_list)
 
   file_path_obj = Path(file_path)
   parent_dir = file_path_obj.parent
@@ -134,6 +132,29 @@ def main(argv):
   tokenizer.train(text=None, init_words_freq=False)
   tokenizer.save(os.path.join(BASE_PATH, tokenizer_model_name))
   tokenizer.save(os.path.join(BASE_PATH, tokenizer_vocab_name))
+
+
+def main(argv):
+  """Runs a small end-to-end pretokenization and BPE training example."""
+  del argv
+  dataset_name = 'TinyStoriesV2-GPT4-'
+  split = 'train'
+
+  tokenizer_vocab_name = f"{dataset_name}{split}_vocab.bin"
+
+  # Train the tokenizer.
+  # train_tokenizer(split=split, dataset_name=dataset_name)
+
+  input_text = "A random text to be tokenized. <|endoftext|> What is your name?"
+
+  tokenizer = bpe_tokenizer.BPETokenizer.load(
+      os.path.join(BASE_PATH, tokenizer_vocab_name))
+  tokens = tokenizer.encode(input_text)
+  print("Input text to be tokenize: ", input_text)
+  print("Tokenized: : ", tokens)
+  detokenized = tokenizer.decode(tokens)
+  print("De-tokenized:", detokenized)
+  assert detokenized == input_text
 
 
 if __name__ == '__main__':
