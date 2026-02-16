@@ -10,9 +10,9 @@ import pickle
 from absl import app
 
 # Special tokens to be put at the beginning  of the tokenizer.
-SPECIAL_TOKENS = ("<|endoftext|>",)
-
-SPECIAL_TOKENS_SET = set(SPECIAL_TOKENS)
+SPECIAL_TOKENS = {
+    "<|endoftext|>",
+}
 
 # REGEX pattern to pre-tokenizer the texts.
 _PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -376,7 +376,7 @@ class BPETokenizer:
     output_tokens = []
 
     for text in chunked_texts:
-      if text in SPECIAL_TOKENS_SET:
+      if text in SPECIAL_TOKENS:
         output_tokens.append(self.bytes_to_idx[text.encode('utf-8')])
         continue
       word_bytes_list = []
