@@ -60,35 +60,38 @@ class BPETokenizer:
       tokens.
     target_vocab_size: Desired vocabulary size after BPE merges.
     current_vocab_size: Current number of entries in the vocabulary.
-    new_bytes_to_replace: Cache mapping candidate merged pair bytes to words
+    new_bytes_to_replace: Cache mapping candidate merged token pairs to words
       that contain the pair.
-    new_bytes_pair_freq: Weighted frequency table for adjacent byte pairs.
+    new_bytes_pair_freq: Weighted frequency table for adjacent token pairs.
+    merge_ranks: Mapping from merged token-byte pairs to training merge order.
   """
   bytes_to_idx: dict[bytes, int] = field(default_factory=dict)
   idx_to_bytes: dict[int, bytes] = field(default_factory=dict)
-  words_frequency: dict[tuple[bytes], int] = field(default_factory=dict)
+  words_frequency: dict[tuple[int, ...], int] = field(default_factory=dict)
   target_vocab_size: int = 10000
   current_vocab_size: int = 0
 
-  # New merged bytes to set of words it should replace.
+  # Adjacent token pairs to set of words they should replace.
   # Should be updated each time a origin_word -> new_word
-  new_bytes_to_replace: dict[bytes, set] = field(
+  new_bytes_to_replace: dict[tuple[int, int], set] = field(
       default_factory=lambda: defaultdict(set))
 
-  # Byte pairs to frequency counts. Should be updated each time an
+  # Adjacent token pairs to frequency counts. Should be updated each time an
   # origin_word -> new_word.
-  new_bytes_pair_freq: dict[bytes, int] = field(default_factory=dict)
+  new_bytes_pair_freq: dict[tuple[int, int], int] = field(default_factory=dict)
+  merge_ranks: dict[tuple[bytes, bytes], int] = field(default_factory=dict)
 
   def __post_init__(self):
     """Initializes the byte-level base vocabulary and regex pretokenizer."""
-    # Initialize the tokenizer with single byte tokens.
     for special_token in SPECIAL_TOKENS:
       self.bytes_to_idx[(
           special_token.encode('utf-8'))] = self.current_vocab_size
+      self.idx_to_bytes[self.current_vocab_size] = special_token.encode('utf-8')
       self.current_vocab_size += 1
 
     for i in range(2**8):
       self.bytes_to_idx[bytes([i])] = self.current_vocab_size
+      self.idx_to_bytes[self.current_vocab_size] = bytes([i])
       self.current_vocab_size += 1
 
     self.pattern = re.compile(_PATTERN)
@@ -102,7 +105,8 @@ class BPETokenizer:
     for text in input_texts:
       for match in self.pattern.finditer(text):
         matched_bytes = match.group(0).encode('utf-8')
-        word_bytes = tuple(bytes([b]) for b in matched_bytes)
+        # Convert the byte -> integer using pre-initialized vocabulary.
+        word_bytes = tuple(self.bytes_to_idx[bytes([b])] for b in matched_bytes)
         self.words_frequency[word_bytes] = self.words_frequency.get(
             word_bytes, 0) + 1
 
@@ -111,35 +115,39 @@ class BPETokenizer:
     self.new_bytes_pair_freq.clear()
     self.new_bytes_to_replace.clear()
 
-    for word, freq in self.words_frequency.items():
+    for word, freq in tqdm.tqdm(self.words_frequency.items()):
+      # Word is already int representation in this case.
       for b1, b2 in zip(word, word[1:]):
-        pair = b1 + b2
+        pair = (b1, b2)
         self.new_bytes_pair_freq[pair] = self.new_bytes_pair_freq.get(pair,
                                                                       0) + freq
         self.new_bytes_to_replace[pair].add(word)
 
-  def _count_adjacent_pairs(self, word: tuple[bytes]) -> dict[bytes, int]:
+  def _count_adjacent_pairs(
+      self, word: tuple[int, ...]) -> dict[tuple[int, int], int]:
     """Counts adjacent token-pair multiplicities within one tokenized word.
 
     Args:
       word: Tokenized word represented as a tuple of byte tokens.
 
     Returns:
-      Mapping from adjacent byte-pair token to local occurrence count.
+      Mapping from adjacent token pair to local occurrence count.
     """
     pair_counts = {}
     for b1, b2 in zip(word, word[1:]):
-      pair = b1 + b2
+      pair = (b1, b2)
       pair_counts[pair] = pair_counts.get(pair, 0) + 1
     return pair_counts
 
-  def _merge_word_with_pair(self, word: tuple[bytes],
-                            target_pair: bytes) -> tuple[bytes]:
+  def _merge_word_with_pair(self, word: tuple[int, ...],
+                            target_pair: tuple[int, int],
+                            merged_token: int) -> tuple[int, ...]:
     """Merges non-overlapping occurrences of one pair inside a word.
 
     Args:
       word: Original tokenized word.
-      target_pair: Pair token to merge.
+      target_pair: Token pair to merge.
+      merged_token: Bytes of the merged token.
 
     Returns:
       The word tuple after applying the non-overlapping merge rule.
@@ -147,18 +155,19 @@ class BPETokenizer:
     merged_word = []
     i = 0
     n = len(word)
+    left_token, right_token = target_pair
     while i < n:
       b1 = word[i]
-      if i + 1 < n and b1 + word[i + 1] == target_pair:
-        merged_word.append(target_pair)
+      if i + 1 < n and b1 == left_token and word[i + 1] == right_token:
+        merged_word.append(merged_token)
         i += 2
       else:
         merged_word.append(b1)
         i += 1
     return tuple(merged_word)
 
-  def _remove_word_contribution(self, word: tuple[bytes], word_freq: int,
-                                pair_counts: dict[bytes, int]):
+  def _remove_word_contribution(self, word: tuple[int, ...], word_freq: int,
+                                pair_counts: dict[tuple[int, int], int]):
     """Removes one word's weighted pair contributions from global caches.
 
     Args:
@@ -181,8 +190,8 @@ class BPETokenizer:
         if not words:
           self.new_bytes_to_replace.pop(pair, None)
 
-  def _add_word_contribution(self, word: tuple[bytes], word_freq: int,
-                             pair_counts: dict[bytes, int]):
+  def _add_word_contribution(self, word: tuple[int, ...], word_freq: int,
+                             pair_counts: dict[tuple[int, int], int]):
     """Adds one word's weighted pair contributions into global caches.
 
     Args:
@@ -196,20 +205,22 @@ class BPETokenizer:
                                                                     0) + delta
       self.new_bytes_to_replace[pair].add(word)
 
-  def _merge_affected_word(self, original_word: tuple[bytes],
-                           merged_pair: bytes):
+  def _merge_affected_word(self, original_word: tuple[int, ...],
+                           merged_pair: tuple[int, int], merged_token: int):
     """Applies one merge to a cached-affected word and updates indexes.
 
     Args:
       original_word: Existing word tuple that may contain ``merged_pair``.
-      merged_pair: Pair token selected for this BPE merge step.
+      merged_pair: Token pair selected for this BPE merge step.
+      merged_token: Int representation of the merged token.
     """
     word_freq = self.words_frequency.get(original_word)
     if word_freq is None:
       return
 
     old_pair_counts = self._count_adjacent_pairs(original_word)
-    new_word = self._merge_word_with_pair(original_word, merged_pair)
+    new_word = self._merge_word_with_pair(original_word, merged_pair,
+                                          merged_token)
 
     if new_word == original_word:
       return
@@ -234,23 +245,33 @@ class BPETokenizer:
     # Pick the most frequent pair (no heap).
     max_freq_bytes_pair = max(
         self.new_bytes_pair_freq.items(),
-        key=lambda x: (x[1], x[0]),
+        key=lambda x:
+        (x[1], self.idx_to_bytes[x[0][0]], self.idx_to_bytes[x[0][1]]),
     )
-    max_freq_bytes = max_freq_bytes_pair[0]
+    max_freq_pair = max_freq_bytes_pair[0]
+    # Bytes type.
+    merged_token = self.idx_to_bytes[max_freq_pair[0]] + self.idx_to_bytes[
+        max_freq_pair[1]]
+    merge_pair_bytes = (self.idx_to_bytes[max_freq_pair[0]],
+                        self.idx_to_bytes[max_freq_pair[1]])
+    if merge_pair_bytes not in self.merge_ranks:
+      self.merge_ranks[merge_pair_bytes] = len(self.merge_ranks)
 
     # Add merged token to vocab.
-    self.bytes_to_idx[max_freq_bytes] = self.vocab_size
+    self.bytes_to_idx[merged_token] = self.vocab_size
+    self.idx_to_bytes[self.vocab_size] = merged_token
     self.current_vocab_size += 1
 
-    affected_words = list(self.new_bytes_to_replace.get(max_freq_bytes, set()))
+    affected_words = list(self.new_bytes_to_replace.get(max_freq_pair, set()))
     if not affected_words:
       # Stale entry guard.
-      self.new_bytes_pair_freq.pop(max_freq_bytes, None)
-      self.new_bytes_to_replace.pop(max_freq_bytes, None)
+      self.new_bytes_pair_freq.pop(max_freq_pair, None)
+      self.new_bytes_to_replace.pop(max_freq_pair, None)
       return True
 
     for original_word in affected_words:
-      self._merge_affected_word(original_word, max_freq_bytes)
+      self._merge_affected_word(original_word, max_freq_pair,
+                                self.bytes_to_idx[merged_token])
 
     return True
 
@@ -261,14 +282,12 @@ class BPETokenizer:
     print(f"===== Save words frequency to {filepath} successfully. =====")
 
   def load_and_merge_words_freq(self, filepaths: list[str]):
-    for idx, filepath in enumerate(filepaths):
-      with open(filepath, 'rb') as f:
-        if idx == 0:
-          self.words_frequency = pickle.load(f)
-        else:
-          self.words_frequency = dict(
-              Counter(self.words_frequency) + Counter(pickle.load(f)))
-
+    total = Counter()
+    for filepath in filepaths:
+      print(f"Loading word freq from {filepath}")
+      with open(filepath, "rb") as f:
+        total.update(pickle.load(f))
+    self.words_frequency = dict(total)
     print("===== Load words frequency successfully. =====")
 
   def save(self, filepath):
@@ -291,7 +310,9 @@ class BPETokenizer:
     with open(filepath, 'wb') as f:
       vocab_dict = {
           'bytes_to_idx': self.bytes_to_idx,
-          'idx_to_bytes': self.idx_to_bytes
+          'idx_to_bytes': self.idx_to_bytes,
+          'vocab_size': self.current_vocab_size,
+          'merge_ranks': self.merge_ranks,
       }
       pickle.dump(vocab_dict, f)
       print(f"===== Save tokenizer vocab to {filepath} successfully. =====")
@@ -306,6 +327,8 @@ class BPETokenizer:
       vocab_dict = pickle.load(f)
       self.bytes_to_idx = vocab_dict['bytes_to_idx']
       self.idx_to_bytes = vocab_dict['idx_to_bytes']
+      self.current_vocab_size = vocab_dict['vocab_size']
+      self.merge_ranks = vocab_dict.get('merge_ranks', {})
       print(f"===== Load tokenizer vocab from {filepath} successfully. =====")
 
   @classmethod
@@ -349,30 +372,45 @@ class BPETokenizer:
       if self.current_vocab_size == self.target_vocab_size or not updated:
         break
 
-    # Build the reverse vocabulary.
-    self.idx_to_bytes = {a: b for b, a in self.bytes_to_idx.items()}
+  def _merge_encoded_word_with_pair(self, word: tuple[bytes, ...],
+                                    target_pair: tuple[bytes,
+                                                       bytes]) -> tuple[bytes,
+                                                                        ...]:
+    merged_word = []
+    left_token, right_token = target_pair
+    i = 0
+    while i < len(word):
+      if (i + 1 < len(word) and word[i] == left_token
+          and word[i + 1] == right_token):
+        merged_word.append(left_token + right_token)
+        i += 2
+      else:
+        merged_word.append(word[i])
+        i += 1
+    return tuple(merged_word)
 
-  def _encode_word(self, word: list[bytes] | tuple[bytes]) -> list[int]:
-    new_word = word
-    while True:
-      found_new_word = False
-      for idx, (bytes1, bytes2) in enumerate(zip(new_word, new_word[1:])):
-        new_byte = bytes1 + bytes2
-        temp_new_word = new_word[:idx] + (new_byte,) + new_word[idx + 2:]
-        new_word_exists = all(a in self.bytes_to_idx for a in temp_new_word)
-        if new_word_exists:
-          found_new_word = True
-          new_word = temp_new_word
-          break
-      if not found_new_word:
+  def _encode_word(self, word: list[bytes] | tuple[bytes, ...]) -> list[int]:
+    new_word = tuple(word)
+    while len(new_word) >= 2:
+      best_pair = None
+      best_rank = None
+      for pair in zip(new_word, new_word[1:]):
+        rank = self.merge_ranks.get(pair)
+        if rank is None:
+          continue
+        if best_rank is None or rank < best_rank:
+          best_rank = rank
+          best_pair = pair
+
+      if best_pair is None:
         break
+      new_word = self._merge_encoded_word_with_pair(new_word, best_pair)
 
     return [self.bytes_to_idx[a] for a in new_word]
 
   def encode(self, text):
     chunked_texts = split_text_with_special_tokens_inclusive(
         SPECIAL_TOKENS, text)
-    print(chunked_texts)
     output_tokens = []
 
     for text in chunked_texts:
@@ -408,6 +446,7 @@ def main(argv):
 
   tokenizer = BPETokenizer()
   tokenizer.train(input_texts)
+  print(tokenizer.vocab)
 
 
 if __name__ == '__main__':
