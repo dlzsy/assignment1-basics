@@ -2,6 +2,7 @@
 import dataclasses
 from dataclasses import field
 from collections import defaultdict
+from typing import Iterable
 import regex as re
 import tqdm
 from collections import Counter
@@ -433,6 +434,34 @@ class BPETokenizer:
       final_output += self.idx_to_bytes[token]
 
     return final_output.decode('utf-8')
+
+
+class TokenizerForTest:
+
+  def __init__(self,
+               vocab: dict[int, bytes],
+               merges: list[tuple[bytes, bytes]],
+               special_tokens: list[str] | None = None):
+    self.special_tokens = set(special_tokens)
+    self.idx_to_bytes = vocab
+    self.bytes_to_idx = {b: a for b, a in self.idx_to_bytes.items()}
+    self.merge_ranks = {b: a for a, b in enumerate(merges)}
+
+  @classmethod
+  def from_files(cls,
+                 vocab_filepath: str,
+                 merges_filepath: str,
+                 special_tokens: list[str] | None = None):
+    raise NotImplementedError
+
+  def encode(self, text: str):
+    raise NotImplementedError
+
+  def encode_iterable(self, iterable: Iterable[str]):
+    raise NotImplementedError
+
+  def decode(self, ids: list[int]):
+    raise NotImplementedError
 
 
 def main(argv):
