@@ -70,6 +70,7 @@ class BPETokenizer:
   words_frequency: dict[tuple[int, ...], int] = field(default_factory=dict)
   target_vocab_size: int = 10000
   current_vocab_size: int = 0
+  special_tokens: set[str] = field(default_factory=lambda: SPECIAL_TOKENS)
 
   # Adjacent token pairs to set of words they should replace.
   # Should be updated each time a origin_word -> new_word
@@ -83,7 +84,7 @@ class BPETokenizer:
 
   def __post_init__(self):
     """Initializes the byte-level base vocabulary and regex pretokenizer."""
-    for special_token in SPECIAL_TOKENS:
+    for special_token in self.special_tokens:
       self.bytes_to_idx[(
           special_token.encode('utf-8'))] = self.current_vocab_size
       self.idx_to_bytes[self.current_vocab_size] = special_token.encode('utf-8')
@@ -372,16 +373,15 @@ class BPETokenizer:
       if self.current_vocab_size == self.target_vocab_size or not updated:
         break
 
-  def _merge_encoded_word_with_pair(self, word: tuple[bytes, ...],
-                                    target_pair: tuple[bytes,
-                                                       bytes]) -> tuple[bytes,
-                                                                        ...]:
+  def _merge_encoded_word_with_pair(
+      self, word: tuple[bytes, ...],
+      target_pair: tuple[bytes, bytes]) -> tuple[bytes, ...]:
     merged_word = []
     left_token, right_token = target_pair
     i = 0
     while i < len(word):
-      if (i + 1 < len(word) and word[i] == left_token
-          and word[i + 1] == right_token):
+      if (i + 1 < len(word) and word[i] == left_token and
+          word[i + 1] == right_token):
         merged_word.append(left_token + right_token)
         i += 2
       else:
@@ -410,11 +410,11 @@ class BPETokenizer:
 
   def encode(self, text):
     chunked_texts = split_text_with_special_tokens_inclusive(
-        SPECIAL_TOKENS, text)
+        self.special_tokens, text)
     output_tokens = []
 
     for text in chunked_texts:
-      if text in SPECIAL_TOKENS:
+      if text in self.special_tokens:
         output_tokens.append(self.bytes_to_idx[text.encode('utf-8')])
         continue
       word_bytes_list = []
