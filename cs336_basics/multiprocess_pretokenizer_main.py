@@ -145,9 +145,9 @@ def main(argv):
   tokenizer_vocab_name = f"{dataset_name}{split}_vocab.bin"
 
   # Train the tokenizer.
-  train_tokenizer(split=split, dataset_name=dataset_name)
+  #train_tokenizer(split=split, dataset_name=dataset_name)
 
-  input_text = "A random text to be tokenized. <|endoftext|> What is your name?"
+  input_text = "Héllò hôw <|endoftext|><|endoftext|> are ü? 🙃<|endoftext|>"
   tokenizer = bpe_tokenizer.BPETokenizer(
       target_vocab_size=_TARGET_VOCAB_SIZE.value,
       current_vocab_size=_TARGET_VOCAB_SIZE.value)

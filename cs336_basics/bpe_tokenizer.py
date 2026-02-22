@@ -19,6 +19,19 @@ SPECIAL_TOKENS = {
 _PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
+def _special_tokens_pattern(special_tokens) -> str | None:
+  """Builds a deterministic regex alternation for special tokens.
+
+  Tokens are sorted by descending length so overlapping tokens use
+  longest-match behavior. A lexical tie-breaker keeps behavior deterministic.
+  """
+  ordered_tokens = sorted(set(special_tokens),
+                          key=lambda token: (-len(token), token))
+  if not ordered_tokens:
+    return None
+  return '|'.join(re.escape(token) for token in ordered_tokens)
+
+
 def split_text_with_special_tokens(special_tokens, s):
   """Splits text segments around special tokens.
 
@@ -29,7 +42,10 @@ def split_text_with_special_tokens(special_tokens, s):
   Returns:
     A list of text chunks separated by any special token.
   """
-  return re.split(re.escape('|'.join(special_tokens)), s)
+  pattern = _special_tokens_pattern(special_tokens)
+  if pattern is None:
+    return [s]
+  return re.split(pattern, s)
 
 
 def split_text_with_special_tokens_inclusive(special_tokens, s):
@@ -43,7 +59,10 @@ def split_text_with_special_tokens_inclusive(special_tokens, s):
     A list of text chunks separated by any special token, with special tokens
       also within but in corresponding idx of the list following the order.
   """
-  pattern = f"({'|'.join(re.escape(t) for t in special_tokens)})"
+  pattern = _special_tokens_pattern(special_tokens)
+  if pattern is None:
+    return (s,) if s else tuple()
+  pattern = f"({pattern})"
   return tuple(t for t in re.split(pattern, s) if t)
 
 
@@ -442,26 +461,99 @@ class TokenizerForTest:
                vocab: dict[int, bytes],
                merges: list[tuple[bytes, bytes]],
                special_tokens: list[str] | None = None):
-    self.special_tokens = set(special_tokens)
+    self.special_tokens = None
+    if special_tokens is not None:
+      self.special_tokens = set(special_tokens)
     self.idx_to_bytes = vocab
-    self.bytes_to_idx = {b: a for b, a in self.idx_to_bytes.items()}
+    self.bytes_to_idx = {b: a for a, b in self.idx_to_bytes.items()}
     self.merge_ranks = {b: a for a, b in enumerate(merges)}
+    self.pattern = re.compile(_PATTERN)
 
   @classmethod
   def from_files(cls,
                  vocab_filepath: str,
                  merges_filepath: str,
                  special_tokens: list[str] | None = None):
-    raise NotImplementedError
+    with open(vocab_filepath, 'rb') as f:
+      vocab = pickle.load(f)
 
-  def encode(self, text: str):
-    raise NotImplementedError
+    with open(merges_filepath, 'rb') as f:
+      merges = pickle.load(f)
 
-  def encode_iterable(self, iterable: Iterable[str]):
-    raise NotImplementedError
+    return TokenizerForTest(vocab=vocab,
+                            merges=merges,
+                            special_tokens=special_tokens)
 
-  def decode(self, ids: list[int]):
-    raise NotImplementedError
+  def _merge_word_with_pair(self, word: tuple[bytes, ...],
+                            merge: tuple[bytes, bytes]) -> tuple[bytes, ...]:
+    new_word = []
+    idx = 0
+    while idx < len(word):
+      if idx + 1 >= len(word):
+        new_word.append(word[idx])
+        idx += 1
+        break
+      left = word[idx]
+      right = word[idx + 1]
+      if left == merge[0] and right == merge[1]:
+        new_word.append(left + right)
+        idx += 2
+      else:
+        new_word.append(left)
+        idx += 1
+    return tuple(new_word)
+
+  def _encode_word(self, word: tuple[bytes, ...]) -> list[int]:
+    new_word = tuple(word)
+    while len(new_word) >= 2:
+      best_pair = None
+      best_rank = None
+      for pair in zip(new_word, new_word[1:]):
+        rank = self.merge_ranks.get(pair, None)
+        if rank is None:
+          continue
+        if best_rank is None or best_rank > rank:
+          best_rank = rank
+          best_pair = pair
+
+      if best_pair is None:
+        break
+
+      new_word = self._merge_word_with_pair(new_word, best_pair)
+
+    return [self.bytes_to_idx[x] for x in new_word]
+
+  def encode(self, text: str) -> list[int]:
+    chunked_texts = [text]
+    if self.special_tokens is not None:
+      chunked_texts = split_text_with_special_tokens_inclusive(
+          special_tokens=self.special_tokens, s=text)
+    final_tokens = []
+    for chunked_text in chunked_texts:
+      if self.special_tokens is not None and chunked_text in self.special_tokens:
+        final_tokens.append(self.bytes_to_idx[chunked_text.encode("utf-8")])
+        continue
+
+      word_bytes_list = []
+      for match in self.pattern.finditer(chunked_text):
+        matched_bytes = match.group(0).encode('utf-8')
+        word_bytes_list.append(tuple(bytes([b]) for b in matched_bytes))
+
+      for word_bytes in word_bytes_list:
+        final_tokens.extend(self._encode_word(word_bytes))
+    return final_tokens
+
+  def encode_iterable(self, iterable: Iterable[str]) -> Iterable[int]:
+    for text in iterable:
+      for final_token in self.encode(text):
+        yield final_token
+
+  def decode(self, ids: list[int] | list[list[int]]):
+    decoded_text = b''
+    for idx in ids:
+      decoded_text += self.idx_to_bytes[idx]
+
+    return decoded_text.decode("utf-8", errors='ignore')
 
 
 def main(argv):
